@@ -1,0 +1,131 @@
+name: gsp
+
+x-app: &app
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment:
+    PORT: "3000"
+    MONGO_DB: ${MONGO_DB:-gsp}
+    MONGO_URI_FILE: /run/secrets/mongo_app_uri
+    SHUTDOWN_GRACE_MS: "20000"
+  secrets: [mongo_app_uri]
+  stop_grace_period: 25s
+  depends_on:
+    mongo:
+      condition: service_healthy
+  deploy:
+    resources:
+      limits:
+        memory: 256m
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    command: ["--auth", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongo_root_user
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_DB: ${MONGO_DB:-gsp}
+    secrets:
+      - mongo_root_user
+      - mongo_root_password
+      - mongo_app_password
+      - mongo_ops_password
+    volumes:
+      - mongo_data:/data/db
+      - ../mongo/init:/docker-entrypoint-initdb.d:ro
+    # No "ports:" on purpose. Mongo is only reachable on the internal data network.
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *logging
+
+  app_blue:
+    <<: *app
+    image: ${APP_IMAGE:-gsp-notes}:${BLUE_TAG:-none}
+    environment:
+      PORT: "3000"
+      MONGO_DB: ${MONGO_DB:-gsp}
+      MONGO_URI_FILE: /run/secrets/mongo_app_uri
+      SHUTDOWN_GRACE_MS: "20000"
+      APP_COLOR: blue
+    networks:
+      edge:
+        ipv4_address: 172.30.0.11
+      data: {}
+
+  app_green:
+    <<: *app
+    image: ${APP_IMAGE:-gsp-notes}:${GREEN_TAG:-none}
+    environment:
+      PORT: "3000"
+      MONGO_DB: ${MONGO_DB:-gsp}
+      MONGO_URI_FILE: /run/secrets/mongo_app_uri
+      SHUTDOWN_GRACE_MS: "20000"
+      APP_COLOR: green
+    networks:
+      edge:
+        ipv4_address: 172.30.0.12
+      data: {}
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../nginx/conf.d:/etc/nginx/conf.d:ro
+      - ../nginx/njs:/etc/nginx/njs:ro
+      # Directory mount, not a single file: deploy.sh replaces live/color with
+      # an atomic rename, and a single-file bind mount would keep pointing at
+      # the old inode.
+      - ../nginx/live:/etc/nginx/live:ro
+      - ../nginx/certs:/etc/nginx/certs:ro
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  data:
+    internal: true
+
+volumes:
+  mongo_data: {}
+
+secrets:
+  mongo_root_user:
+    file: ../secrets/mongo_root_user
+  mongo_root_password:
+    file: ../secrets/mongo_root_password
+  mongo_app_password:
+    file: ../secrets/mongo_app_password
+  mongo_ops_password:
+    file: ../secrets/mongo_ops_password
+  mongo_app_uri:
+    file: ../secrets/mongo_app_uri

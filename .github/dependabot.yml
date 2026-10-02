@@ -1,0 +1,33 @@
+version: 2
+
+# Minor and patch updates arrive automatically, grouped into one PR per
+# ecosystem, and must pass the full CI rehearsal before merging. Major
+# versions (Express 5, Node 24, a new major of an action) change behaviour and
+# are upgraded deliberately, not by a bot.
+updates:
+  - package-ecosystem: npm
+    directory: /app
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /app
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      actions:
+        patterns: ["*"]

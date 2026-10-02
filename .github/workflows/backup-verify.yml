@@ -1,0 +1,76 @@
+name: backup-verify
+
+# Nightly: take the newest backup from the off-site bucket, check it is
+# recent, check its checksum, decrypt it, restore it into a throwaway mongo and
+# confirm there is data in it. A backup nobody has restored is not a backup.
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: vars.OFFSITE_PATH != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # rclone reads remotes from env: this defines a remote called "offsite"
+      RCLONE_CONFIG_OFFSITE_TYPE: s3
+      RCLONE_CONFIG_OFFSITE_PROVIDER: ${{ vars.OFFSITE_PROVIDER || 'Cloudflare' }}
+      RCLONE_CONFIG_OFFSITE_ENDPOINT: ${{ vars.OFFSITE_ENDPOINT }}
+      RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID: ${{ secrets.OFFSITE_READ_KEY_ID }}
+      RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY: ${{ secrets.OFFSITE_READ_SECRET }}
+      REMOTE: offsite:${{ vars.OFFSITE_PATH }}
+      MAX_AGE_MIN: "120"
+    steps:
+      - name: tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq age rclone
+
+      - name: fetch newest backup
+        id: fetch
+        run: |
+          latest=$(rclone lsf "$REMOTE" --include 'gsp-mongo-*.age' | sort | tail -1)
+          [ -n "$latest" ] || { echo "no backups found"; exit 1; }
+          rclone copy "$REMOTE/$latest" .
+          rclone copy "$REMOTE/$latest.sha256" .
+          ts=$(sed -E 's/^gsp-mongo-(....)(..)(..)T(..)(..)(..)Z.*/\1-\2-\3 \4:\5:\6/' <<<"$latest")
+          age_min=$(( ( $(date -u +%s) - $(date -u -d "$ts" +%s) ) / 60 ))
+          echo "newest: $latest (${age_min} min old)"
+          echo "file=$latest" >> "$GITHUB_OUTPUT"
+          [ "$age_min" -le "$MAX_AGE_MIN" ] || { echo "newest backup is older than ${MAX_AGE_MIN} min"; exit 1; }
+
+      - name: checksum
+        run: sha256sum -c "${{ steps.fetch.outputs.file }}.sha256"
+
+      - name: restore into scratch mongo
+        env:
+          IDENTITY: ${{ secrets.BACKUP_AGE_IDENTITY }}
+          FILE: ${{ steps.fetch.outputs.file }}
+        run: |
+          umask 077
+          printf '%s\n' "$IDENTITY" > "$RUNNER_TEMP/id.txt"
+          docker run -d --name scratch mongo:7.0 >/dev/null
+          for _ in $(seq 1 30); do docker exec scratch mongosh --quiet --eval 'db.adminCommand("ping").ok' >/dev/null 2>&1 && break; sleep 2; done
+          start=$(date +%s)
+          age -d -i "$RUNNER_TEMP/id.txt" "$FILE" | docker exec -i scratch mongorestore --quiet --archive --gzip
+          echo "restore took $(( $(date +%s) - start ))s"
+          rm -f "$RUNNER_TEMP/id.txt"
+
+      - name: sanity check restored data
+        run: |
+          n=$(docker exec scratch mongosh --quiet gsp --eval 'db.notes.countDocuments()')
+          echo "notes restored: $n"
+          [ "$n" -gt 0 ]
+
+      - name: alert on failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.ALERT_WEBHOOK_URL }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          msg="ALERT: nightly backup verification FAILED. ${RUN}"
+          if [[ "$WEBHOOK" == *discord* ]]; then body=$(jq -n --arg c "$msg" '{content:$c}'); else body=$(jq -n --arg t "$msg" '{text:$t}'); fi
+          curl -fsS -H 'Content-Type: application/json' -d "$body" "$WEBHOOK"

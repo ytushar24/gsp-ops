@@ -1,0 +1,11 @@
+title = "gsp-ops gitleaks config"
+
+[extend]
+useDefault = true
+
+# Example values in .env.example are placeholders, not secrets.
+[allowlist]
+paths = [
+  '''\.env\.example$''',
+  '''app/package-lock\.json$''',
+]

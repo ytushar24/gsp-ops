@@ -1,0 +1,49 @@
+name: uptime
+
+# External check from outside our own network. GitHub's scheduler is best
+# effort (runs can be late by several minutes under load), which is fine as a
+# second opinion next to the host cron checker, not as the only one.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: vars.PUBLIC_URL != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: probe /readyz (3 attempts, 20s apart)
+        id: probe
+        env:
+          URL: ${{ vars.PUBLIC_URL }}
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "$URL/readyz" || true)
+            echo "attempt $i: HTTP $code $(cat body.json 2>/dev/null)"
+            if [ "$code" = "200" ]; then exit 0; fi
+            # not `[ ... ] && sleep`: that returns 1 on the last pass and
+            # `set -e` would abort before the status code is recorded below.
+            if [ "$i" -lt 3 ]; then sleep 20; fi
+          done
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 1
+      - name: alert
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.ALERT_WEBHOOK_URL }}
+          URL: ${{ vars.PUBLIC_URL }}
+          CODE: ${{ steps.probe.outputs.code }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          msg="ALERT (external): ${URL}/readyz failing, last HTTP ${CODE:-none} after 3 attempts. Run: ${RUN} Runbook: README.md#site-is-down-at-2am"
+          if [[ "$WEBHOOK" == *discord* ]]; then body=$(jq -n --arg c "$msg" '{content:$c}'); else body=$(jq -n --arg t "$msg" '{text:$t}'); fi
+          curl -fsS -H 'Content-Type: application/json' -d "$body" "$WEBHOOK"

@@ -1,0 +1,183 @@
+name: ci-cd
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      # Whole history, not just the diff: a secret committed and then deleted
+      # is still a leaked secret.
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 \
+            git /repo --config /repo/.gitleaks.toml --redact --verbose
+
+  lint-test:
+    runs-on: ubuntu-24.04
+    services:
+      mongo:
+        image: mongo:7.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+        env:
+          MONGO_TEST_URI: mongodb://localhost:27017
+      - name: npm audit (prod deps)
+        run: npm audit --omit=dev --audit-level=high
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: shellcheck -x scripts/*.sh scripts/lib/*.sh mongo/init/*.sh
+
+  # Brings the whole stack up inside the runner and runs the same scripts we
+  # use on the server: first deploy, a deploy under load, a backup, and the
+  # full restore drill. If any of the ops tooling breaks, this goes red.
+  stack-rehearsal:
+    needs: [lint-test, shellcheck]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OFFSITE_DIR: ${{ github.workspace }}/.offsite-sim
+      # not ${{ runner.temp }}: the runner context is not available in a
+      # job-level env block, and using it there fails the whole workflow at
+      # parse time. The runner is thrown away after the job either way.
+      AGE_IDENTITY_FILE: /tmp/backup-identity.txt
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq age
+      - name: secrets and cert (throwaway, generated per run)
+        run: |
+          cp .env.example .env
+          scripts/init-secrets.sh
+          scripts/gen-dev-cert.sh
+      - name: build two releases
+        run: |
+          for v in rehearsal-1 rehearsal-2; do
+            docker build -q -t gsp-notes:$v --build-arg APP_VERSION=$v app
+          done
+      - name: first deploy
+        run: scripts/deploy.sh rehearsal-1
+      - name: deploy under load (must drop zero requests)
+        run: scripts/zero-downtime-test.sh rehearsal-2 45
+      - name: rollback
+        run: scripts/rollback.sh
+      - name: backup
+        run: scripts/backup.sh
+      - name: restore drill
+        run: scripts/restore-drill.sh --identity "$AGE_IDENTITY_FILE" --yes
+      - name: logs on failure
+        if: failure()
+        run: scripts/status.sh; docker compose -p gsp logs --tail 100
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: rehearsal-evidence
+          path: docs/evidence/
+
+  build:
+    needs: [secrets-scan, lint-test, shellcheck]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: meta
+        run: |
+          # ghcr.io/<owner>/<repo>: the package is created by, and owned by, this repo
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: build (local, for scanning)
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: app
+          load: true
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          build-args: APP_VERSION=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: push
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: docker push "$IMAGE:$TAG"
+
+  deploy:
+    needs: [build, stack-rehearsal]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: deploy over ssh
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ vars.DEPLOY_HOST }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          TAG: ${{ needs.build.outputs.tag }}
+        # Pinned host key from a secret, never StrictHostKeyChecking=no.
+        # Values go through env, not ${{ }} inside the script, so nothing
+        # from the event payload can be injected into the shell.
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "deploy@${HOST}" \
+            "cd /opt/gsp && git fetch --quiet origin && git checkout --quiet ${GITHUB_SHA} && APP_IMAGE=${IMAGE} scripts/deploy.sh ${TAG}"

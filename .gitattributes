@@ -1,0 +1,8 @@
+# The shell scripts and the mongo init script run inside Linux containers and
+# on the server. A CRLF checkout on Windows breaks them ("bad interpreter"),
+# so normalise to LF in the repo and on checkout everywhere.
+* text=auto eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+*.png binary
+*.cast binary

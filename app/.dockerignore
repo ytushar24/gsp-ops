@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+test
+.git
+.env
+.env.*
+*.md
+Dockerfile
+.dockerignore
+eslint.config.js

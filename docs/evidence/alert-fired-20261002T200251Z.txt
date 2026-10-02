@@ -1,0 +1,18 @@
+Alert path, real run. Produced by scripts/healthcheck.sh against a local
+webhook receiver standing in for the Slack/Discord endpoint, so the exact
+payloads are visible. ALERT_WEBHOOK_URL pointed at 127.0.0.1:9099.
+
+Scenario: nginx stopped, healthcheck run 3x, nginx started, healthcheck run again.
+FAIL_THRESHOLD=2, so the first failure must NOT page and the third must not repeat.
+
+--- run 0: everything healthy ---
+webhook messages so far: 0
+--- run 1 with nginx down: webhook messages so far: 0 ---
+--- run 2 with nginx down: webhook messages so far: 1 ---
+--- run 3 with nginx down: webhook messages so far: 1 ---
+--- after recovery: webhook messages so far: 2 ---
+
+Messages actually delivered to the webhook:
+
+2026-10-02T20:02:53.864Z  ALERT: readyz failing on Voldemort (2 checks). GET /readyz -> 000. Runbook: README.md#site-is-down-at-2am
+2026-10-02T20:02:55.675Z  RECOVERED: readyz on Voldemort. GET /readyz -> 200.

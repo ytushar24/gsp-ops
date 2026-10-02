@@ -1,0 +1,10 @@
+# /etc/cron.d/gsp  (install with: sudo cp ops/cron/gsp /etc/cron.d/gsp)
+# Runs as the unprivileged "deploy" user that owns /opt/gsp.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Hourly backup at :07 (off the top of the hour, when everything else fires)
+7 * * * *   deploy  /opt/gsp/scripts/backup.sh      >> /var/log/gsp/backup.log 2>&1
+
+# Health, backup freshness and disk, every minute
+* * * * *   deploy  /opt/gsp/scripts/healthcheck.sh >> /var/log/gsp/health.log 2>&1

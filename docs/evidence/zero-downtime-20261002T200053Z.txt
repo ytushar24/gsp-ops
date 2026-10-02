@@ -1,0 +1,27 @@
+# zero-downtime deploy check, 20261002T200053Z
+
+## load generator
+target       https://localhost:8443/readyz
+started      2026-10-02T20:00:53.733Z
+duration     60s, concurrency 20, keepalive false
+requests     69035 (1150.6 req/s)
+succeeded    69035
+failed       0
+status codes {"200":69035}
+errors       {}
+answered by  {"blue:v1.0.0":31621,"green:v1.1.0":37414}
+
+switch timeline:
+  2026-10-02T20:00:53.858Z  now answering: blue:v1.0.0
+  2026-10-02T20:01:21.705Z  now answering: green:v1.1.0
+  2026-10-02T20:01:21.706Z  now answering: blue:v1.0.0
+  2026-10-02T20:01:21.711Z  now answering: green:v1.1.0
+
+## deploy log
+2026-10-02T20:01:13Z [deploy] deploying gsp-notes:v1.1.0 to green (active: blue)
+ Container gsp-mongo-1 Running 
+ Container gsp-app_green-1 Creating 
+ Container gsp-app_green-1 Created 
+ Container gsp-app_green-1 Starting 
+ Container gsp-app_green-1 Started 
+2026-10-02T20:01:22Z [deploy] live: green on v1.1.0. blue left running for rollback (scripts/rollback.sh).

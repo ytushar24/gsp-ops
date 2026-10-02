@@ -1,0 +1,21 @@
+# secrets and keys: never committed
+.env
+secrets/*
+!secrets/README.md
+*.key
+*.pem
+*identity*.txt
+
+# generated at runtime
+nginx/certs/
+nginx/live/
+deploy/state.env
+deploy/history.log
+deploy/.health*
+deploy/.deploy.lock
+backups/
+.offsite-sim/
+
+node_modules/
+*.log
+.DS_Store
